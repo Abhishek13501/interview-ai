@@ -357,7 +357,10 @@ function handleAudioStream(response, onComplete) {
 
   if (currentAudio) { currentAudio.pause(); currentAudio = null; }
   currentAudio = new Audio(audioUrl);
-  currentAudio.play().catch(() => {});
+  console.log('[Audio] created, attempting play');
+  currentAudio.play().catch((e) => {
+    console.warn('[Audio] play() rejected:', e);
+  });
 
   mediaSource.addEventListener('sourceopen', () => {
     sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg');
@@ -398,15 +401,22 @@ function handleAudioStream(response, onComplete) {
   reader.read().then(processChunk);
 
   function onAudioDone() {
+    console.log('[Audio] onAudioDone fired — enabling mic');
     isSpeaking = false;
     setAvatarSpeaking(false);
     setStatus('idle', 'Your turn');
-    URL.revokeObjectURL(audioUrl);
+    // revoke only after a tick so the audio element has fully released the URL
+    setTimeout(() => URL.revokeObjectURL(audioUrl), 100);
     enableRecording();
   }
-  currentAudio.onended = onAudioDone;
-  currentAudio.onerror = onAudioDone;
-}
+  currentAudio.addEventListener('ended', () => {
+    console.log('[Audio] ended event fired');
+    onAudioDone();
+  });
+  currentAudio.addEventListener('error', (e) => {
+    console.warn('[Audio] error event fired', e);
+    onAudioDone();
+  });}
 
 
 function startRecording() {
@@ -531,20 +541,23 @@ async function submitAnswer() {
         recordedBlob    = null;
         recordingChunks = [];
         if (isComplete) {
+          // audio done handler already set in handleAudioStream;
+          // override it to trigger feedback instead of enableRecording
           const finish = () => {
+            console.log('[Audio] closing question — triggering feedback');
             isSpeaking = false;
             setAvatarSpeaking(false);
             triggerFeedback();
           };
           if (currentAudio) {
-            currentAudio.onended = finish;
-            currentAudio.onerror = finish;
+            currentAudio.addEventListener('ended', finish, { once: true });
+            currentAudio.addEventListener('error', finish, { once: true });
           } else {
             finish();
           }
-        } else {
-          endInterviewBtn.disabled = false;
         }
+        // enableRecording() for questions 1-4 is handled by
+        // the onended listener set inside handleAudioStream — no action needed here
       });
     } else {
      
