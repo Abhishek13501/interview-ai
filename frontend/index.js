@@ -1,3 +1,5 @@
+const API_BASE = "https://interview-ai-0xx0.onrender.com";
+
 let mediaRecorder    = null;
 let recordingChunks  = [];
 let recordedBlob     = null;
@@ -468,7 +470,7 @@ async function startInterview() {
   startTimer();
 
   try {
-    const res = await fetch('http://127.0.0.1:5000/start-interview', {
+    const res = await fetch(`${API_BASE}/start-interview`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ subject: currentSubject }),
@@ -509,7 +511,7 @@ async function submitAnswer() {
   formData.append('audio', recordedBlob, 'answer.webm');
 
   try {
-    const res = await fetch('http://127.0.0.1:5000/submit-answer', {
+    const res = await fetch(`${API_BASE}/submit-answer`, {
       method: 'POST',
       body:   formData,
     });
@@ -586,7 +588,7 @@ async function triggerFeedback() {
   setStatus('processing', 'Generating report...');
 
   try {
-    const res  = await fetch('http://127.0.0.1:5000/get-feedback', {
+    const res  = await fetch(`${API_BASE}/get-feedback`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({}),
