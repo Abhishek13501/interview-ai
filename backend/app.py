@@ -1,4 +1,4 @@
-from flask import Flask,request,jsonify,Response
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
@@ -10,7 +10,6 @@ import base64
 import requests
 import tempfile
 import json
-from urllib.parse import quote
 
 load_dotenv()
 
@@ -112,7 +111,8 @@ CORS(app,
      ])
 
 
-def stream_audio(text):
+def generate_audio(text):
+    """Generate speech via Murf AI and return complete base64-encoded MP3."""
     BASE_URL = "https://global.api.murf.ai/v1/speech/stream"
     payload = {
         "text": text,
@@ -122,20 +122,22 @@ def stream_audio(text):
         "sampleRate": 24000,
         "format": "MP3",
     }
-
     headers = {
         "Content-Type": "application/json",
         "api-key": MURF_API_KEY
     }
+    print(f"[Murf] Requesting TTS for: {text[:60]}...")
     response = requests.post(
         BASE_URL,
         headers=headers,
         data=json.dumps(payload),
         stream=True
     )
-    for chunk in response.iter_content(chunk_size=4096):
-        if chunk:
-            yield base64.b64encode(chunk).decode("utf-8") + "\n"
+    response.raise_for_status()
+
+    audio_bytes = b"".join(response.iter_content(chunk_size=4096))
+    print(f"[Murf] Received {len(audio_bytes)} bytes of audio")
+    return base64.b64encode(audio_bytes).decode("utf-8")
 
 
 
@@ -161,13 +163,11 @@ def start_interview():
     }, config=config)
     question = response["messages"][-1].content
     print(f"\n[Question {question_count}] {question}")
-    return Response(
-        stream_audio(question),
-        mimetype='text/plain',
-        headers={
-            'X-Question-Text': quote(question, safe=''),
-        }
-    )
+    audio_b64 = generate_audio(question)
+    return jsonify({
+        "question": question,
+        "audio": audio_b64,
+    })
 
 def speech_to_text(audio_path):
   """Convert audio file to text using AssemblyAI"""
@@ -210,16 +210,13 @@ def submit_answer():
         
         closing_message = response["messages"][-1].content
         print(f"\n[Closing] {closing_message}")
-        
-        return Response(
-            stream_audio(closing_message),
-            mimetype='text/plain',
-            headers={
-                'X-Interview-Complete': 'true',
-                'X-Question-Text': quote(closing_message, safe=''),
-                'X-User-Answer':   quote(answer, safe=''),
-            }
-        )
+        audio_b64 = generate_audio(closing_message)
+        return jsonify({
+            "question": closing_message,
+            "audio":    audio_b64,
+            "interview_complete": True,
+            "user_answer": answer,
+        })
     
     question_count += 1
     
@@ -239,16 +236,13 @@ Be conversational but CONCISE. Only reference what they truly said."""
     
     question = response["messages"][-1].content
     print(f"\n[Question {question_count}] {question}")
-    
-    return Response(
-        stream_audio(question),
-        mimetype='text/plain',
-        headers={
-            'X-Question-Number': str(question_count),
-            'X-Question-Text':   quote(question, safe=''),
-            'X-User-Answer':     quote(answer, safe=''),
-        }
-    )
+    audio_b64 = generate_audio(question)
+    return jsonify({
+        "question":        question,
+        "audio":           audio_b64,
+        "question_number": question_count,
+        "user_answer":     answer,
+    })
 
 
 @app.route("/get-feedback", methods=["POST"])

@@ -325,20 +325,13 @@ function resetAll() {
 }
 
 
-function handleAudioStream(response, onComplete) {
-  const reader      = response.body.getReader();
-  const decoder     = new TextDecoder();
-  const mediaSource = new MediaSource();
-  const audioUrl    = URL.createObjectURL(mediaSource);
-  let   sourceBuffer;
-  const queue       = [];
-  let   sbReady     = false;
-
-
-  const rawQText   = response.headers.get('X-Question-Text');
-  const rawUAnswer = response.headers.get('X-User-Answer');
-  const questionText = rawQText   ? decodeURIComponent(rawQText)   : null;
-  const userAnswer   = rawUAnswer ? decodeURIComponent(rawUAnswer) : null;
+// ---------------------------------------------------------------------------
+// playAudioResponse — unified handler for all JSON audio responses.
+// Decodes base64 MP3, plays it, updates UI state, then calls onDone.
+// ---------------------------------------------------------------------------
+function playAudioResponse(data, onDone) {
+  const questionText = data.question  || null;
+  const userAnswer   = data.user_answer || null;
 
   setAvatarSpeaking(true);
   showWaveform(false);
@@ -347,76 +340,43 @@ function handleAudioStream(response, onComplete) {
   recordBtn.disabled = true;
   submitBtn.classList.add('hidden');
 
-  
-  if (userAnswer) {
-    addMessage('user', userAnswer);
-  }
-
-
+  if (userAnswer) addMessage('user', userAnswer);
   insertAiPlaceholder();
+
+  // Decode base64 → Blob → object URL → Audio element
+  const audioBytes = Uint8Array.from(atob(data.audio), c => c.charCodeAt(0));
+  const blob       = new Blob([audioBytes], { type: 'audio/mpeg' });
+  const audioUrl   = URL.createObjectURL(blob);
 
   if (currentAudio) { currentAudio.pause(); currentAudio = null; }
   currentAudio = new Audio(audioUrl);
-  console.log('[Audio] created, attempting play');
-  currentAudio.play().catch((e) => {
-    console.warn('[Audio] play() rejected:', e);
-  });
-
-  mediaSource.addEventListener('sourceopen', () => {
-    sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg');
-    sbReady = true;
-    flush();
-    sourceBuffer.addEventListener('updateend', flush);
-  });
-
-  function flush() {
-    if (queue.length > 0 && !sourceBuffer.updating) {
-      sourceBuffer.appendBuffer(queue.shift());
-    }
-  }
-
-  function processChunk({ done, value }) {
-    if (done) {
-      if (mediaSource.readyState === 'open') {
-        try { mediaSource.endOfStream(); } catch (e) {}
-      }
-  
-      finaliseAiMessage(questionText);
-      removeStatusChip();
-      if (onComplete) onComplete();
-      return;
-    }
-    decoder.decode(value, { stream: true }).split('\n').forEach(line => {
-      if (!line.trim()) return;
-      try {
-        const bs    = atob(line);
-        const bytes = new Uint8Array(bs.length);
-        for (let i = 0; i < bs.length; i++) bytes[i] = bs.charCodeAt(i);
-        if (sbReady && !sourceBuffer.updating) sourceBuffer.appendBuffer(bytes);
-        else queue.push(bytes);
-      } catch (e) {}
-    });
-    reader.read().then(processChunk);
-  }
-  reader.read().then(processChunk);
+  console.log('[Audio] created from base64 blob, attempting play');
 
   function onAudioDone() {
-    console.log('[Audio] onAudioDone fired — enabling mic');
+    if (!isSpeaking) return;           // guard against double-firing
+    console.log('[Audio] playback done — enabling mic');
     isSpeaking = false;
     setAvatarSpeaking(false);
     setStatus('idle', 'Your turn');
-    // revoke only after a tick so the audio element has fully released the URL
     setTimeout(() => URL.revokeObjectURL(audioUrl), 100);
-    enableRecording();
+    finaliseAiMessage(questionText);
+    removeStatusChip();
+    if (onDone) onDone();
   }
-  currentAudio.addEventListener('ended', () => {
-    console.log('[Audio] ended event fired');
+
+  currentAudio.addEventListener('ended', onAudioDone);
+  currentAudio.addEventListener('error', (e) => {
+    console.warn('[Audio] error event:', e);
     onAudioDone();
   });
-  currentAudio.addEventListener('error', (e) => {
-    console.warn('[Audio] error event fired', e);
+
+  currentAudio.play().catch((e) => {
+    // Rejected play() promise (autoplay policy) does NOT fire the error DOM
+    // event — must call onAudioDone() directly or the UI stays stuck.
+    console.warn('[Audio] play() rejected:', e);
     onAudioDone();
-  });}
+  });
+}
 
 
 function startRecording() {
@@ -472,6 +432,15 @@ function disableRecording() {
 
 
 async function startInterview() {
+  // Unlock autoplay with the user gesture that triggered this call.
+  // A silent 0-duration audio context resume is enough to satisfy
+  // browser autoplay policy for subsequent programmatic audio.play() calls.
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    await ctx.resume();
+    ctx.close();
+  } catch (_) {}
+
   startInterviewBtn.classList.add('hidden');
   recordBtn.classList.remove('hidden');
   recordBtn.disabled = true;
@@ -480,22 +449,17 @@ async function startInterview() {
   startTimer();
 
   try {
-    const res = await fetch(`${API_BASE}/start-interview`, {
+    const res  = await fetch(`${API_BASE}/start-interview`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ subject: currentSubject }),
     });
-
-    const ct = res.headers.get('content-type') || '';
-    if (ct.includes('text/plain')) {
-      handleAudioStream(res, () => { endInterviewBtn.disabled = false; });
-    } else {
-      removeStatusChip();
-      const data = await res.json();
-      if (data.question) addMessage('ai', data.question);
+    const data = await res.json();
+    removeStatusChip();
+    playAudioResponse(data, () => {
       enableRecording();
       endInterviewBtn.disabled = false;
-    }
+    });
   } catch {
     removeStatusChip();
     discardAiPlaceholder();
@@ -525,52 +489,24 @@ async function submitAnswer() {
       method: 'POST',
       body:   formData,
     });
+    const data = await res.json();
 
-    const ct         = res.headers.get('content-type') || '';
-    const isComplete = res.headers.get('X-Interview-Complete') === 'true';
-    const qNum       = res.headers.get('X-Question-Number');
+    recordedBlob    = null;
+    recordingChunks = [];
 
-    if (qNum) updateProgress(parseInt(qNum, 10));
+    if (data.question_number) updateProgress(data.question_number);
 
-  
-    showStatusChip('Generating next question...');
-    setStatus('processing', 'Generating next question...');
+    removeStatusChip();
 
-    if (ct.includes('text/plain')) {
-      handleAudioStream(res, () => {
-        recordedBlob    = null;
-        recordingChunks = [];
-        if (isComplete) {
-          // audio done handler already set in handleAudioStream;
-          // override it to trigger feedback instead of enableRecording
-          const finish = () => {
-            console.log('[Audio] closing question — triggering feedback');
-            isSpeaking = false;
-            setAvatarSpeaking(false);
-            triggerFeedback();
-          };
-          if (currentAudio) {
-            currentAudio.addEventListener('ended', finish, { once: true });
-            currentAudio.addEventListener('error', finish, { once: true });
-          } else {
-            finish();
-          }
-        }
-        // enableRecording() for questions 1-4 is handled by
-        // the onended listener set inside handleAudioStream — no action needed here
+    if (data.interview_complete) {
+      playAudioResponse(data, () => {
+        triggerFeedback();
       });
     } else {
-     
-      removeStatusChip();
-      const data = await res.json();
-      recordedBlob    = null;
-      recordingChunks = [];
-      if (isComplete) {
-        triggerFeedback();
-      } else {
+      playAudioResponse(data, () => {
         enableRecording();
         endInterviewBtn.disabled = false;
-      }
+      });
     }
   } catch (err) {
     removeStatusChip();

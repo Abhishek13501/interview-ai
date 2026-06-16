@@ -8,8 +8,6 @@ A full-stack, voice-based mock interview platform powered by Groq (Llama 3.1), L
 
 [Demo Link Here](https://your-demo-link.com)
 
-> Run locally in under 5 minutes — see [Installation](#installation)
-
 ---
 
 ## Screenshots
@@ -154,7 +152,7 @@ source venv/bin/activate
 
 pip install flask flask-cors python-dotenv langchain-groq langgraph langchain assemblyai requests
 ```
-
+pip install -r requirements.txt
 ### 3. Configure environment variables
 
 ```bash
